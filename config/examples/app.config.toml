@@ -1,0 +1,26 @@
+[project]
+name = "Pitch Pilot"
+
+[server]
+domain = "localhost"
+host = "localhost"
+port = 2525
+
+# TODO: Remove this section later in favor of a reverse-proxy setup.
+#       Maybe only allow it in development mode?
+[server.ssl]
+cert_path = "path/to/cert.pem"
+key_path = "path/to/key.pem"
+
+[server.auth]
+allowed_origins = ["https://"]
+require_email_verification = false
+
+[email.smtp]
+enabled = false # Mutually exclusive with Resend
+
+[email.resend]
+enabled = false # Mutually exclusive with SMTP
+
+[secrets.vault]
+enabled = false

@@ -1,0 +1,15 @@
+# Environment files
+
+
+# Certificate and private key files
+*.pem
+*.crt
+*.key
+*.csr
+*.der
+*.pfx
+*.p12
+
+# Secrets
+ssl/*
+!ssl/.gitkeep
