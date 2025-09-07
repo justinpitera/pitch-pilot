@@ -121,7 +121,7 @@ def scroll_page(driver: ChromeDriver, duration: float, pause_points: list[tuple[
     """
     log(event="scroll_begin", message="Starting smooth scroll", duration=duration)
 
-    # Updated JavaScript with pause support
+    # Enhanced JavaScript with natural scrolling and smooth pause support
     driver.execute_script(script=f"""
 window._scrollState = {{
   startTime: performance.now(),
@@ -131,30 +131,99 @@ window._scrollState = {{
   progress: 0,
   paused: false,
   holdMark: null,
-  holdAccum: 0
+  holdAccum: 0,
+  pauseTransition: 0,
+  speedVariation: 0,
+  microDelay: 0
 }};
 
-function easeInOutCubic(t) {{ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }}
+// Enhanced easing function that mimics natural human scrolling
+function naturalEase(t) {{
+  if (t < 0.1) {{
+    // Gentle start - human hands accelerate gradually
+    return 2 * t * t;
+  }} else if (t < 0.85) {{
+    // Main scrolling phase with subtle variations
+    const base = 0.02 + 0.98 * (t - 0.1) / 0.75;
+    const variation = 0.03 * Math.sin(t * 12.5) * Math.cos(t * 8.3);
+    return base + variation;
+  }} else {{
+    // Natural deceleration at the end
+    const remaining = (1 - t) / 0.15;
+    return 1 - 0.5 * remaining * remaining;
+  }}
+}}
+
+// Add natural speed variations
+function getSpeedMultiplier(t, baseVariation) {{
+  // Create natural rhythm variations
+  const rhythm1 = 0.95 + 0.1 * Math.sin(t * 15.7);  
+  const rhythm2 = 0.98 + 0.04 * Math.cos(t * 23.1);
+  const microVar = 0.99 + 0.02 * Math.sin(t * 47.3);
+  return rhythm1 * rhythm2 * microVar * (1 + baseVariation);
+}}
 
 function step() {{
   const s = window._scrollState;
   const n = performance.now();
 
+  // Handle smooth pause transitions
   if (s.paused) {{
-    if (s.holdMark === null) s.holdMark = n;
+    if (s.holdMark === null) {{
+      s.holdMark = n;
+      s.pauseTransition = 1; // Start deceleration
+    }}
+    // Gradual deceleration into pause
+    if (s.pauseTransition > 0) {{
+      s.pauseTransition = Math.max(0, s.pauseTransition - 0.1);
+    }}
     requestAnimationFrame(step);
     return;
   }} else if (s.holdMark !== null) {{
     s.holdAccum += (n - s.holdMark);
     s.holdMark = null;
+    s.pauseTransition = -1; // Start acceleration from pause
+  }}
+
+  // Gradual acceleration out of pause
+  if (s.pauseTransition < 0) {{
+    s.pauseTransition = Math.min(0, s.pauseTransition + 0.08);
   }}
 
   const e = n - s.startTime - s.holdAccum;
-  const p = Math.min(e / s.duration, 1);
-  const q = easeInOutCubic(p);
-  const y = s.totalHeight * q;
-
-  window.scrollTo(0, y);
+  let p = Math.min(e / s.duration, 1);
+  
+  // Apply pause transition effects
+  if (s.pauseTransition !== 0) {{
+    const transitionEffect = s.pauseTransition > 0 ? s.pauseTransition * 0.3 : -s.pauseTransition * 0.4;
+    p = p * (1 - transitionEffect);
+  }}
+  
+  // Get natural easing position
+  const baseQ = naturalEase(p);
+  
+  // Add speed variations every few frames
+  if (Math.random() < 0.1) {{
+    s.speedVariation = (Math.random() - 0.5) * 0.02;
+  }}
+  
+  // Apply speed multiplier for natural variations
+  const speedMult = getSpeedMultiplier(p, s.speedVariation);
+  const q = Math.min(baseQ * speedMult, 1);
+  
+  // Add micro-delays occasionally for natural pauses
+  if (Math.random() < 0.05 && s.microDelay <= 0 && p > 0.2 && p < 0.8) {{
+    s.microDelay = Math.random() * 3 + 1; // 1-4 frame delay
+  }}
+  
+  if (s.microDelay > 0) {{
+    s.microDelay--;
+    // Don't update scroll position during micro-delay
+  }} else {{
+    const y = s.totalHeight * q;
+    window.scrollTo(0, y);
+  }}
+  
   s.progress = p;
 
   if (p < 1) requestAnimationFrame(step);
@@ -174,26 +243,35 @@ requestAnimationFrame(step);
         finished: bool = bool(scroll_state.get("finished", False))
         percent: int = int(progress * 100)
 
-        if percent != last_percent and percent % 5 == 0:
+        if percent != last_percent and percent % 3 == 0:  # Report every 3% for finer tracking
             log(event="scroll_progress", progress=percent)
             last_percent = percent
             
-        # Handle configured pauses (absolute seconds along the scroll timeline)
+        # Handle configured pauses with smooth transitions (absolute seconds along the scroll timeline)
         elapsed_sec: float = progress * duration
         if remaining_pauses:
             next_start, next_len = remaining_pauses[0]
-            # Trigger pause once when we pass the start time
+            # Trigger smooth pause once when we pass the start time
             if elapsed_sec >= next_start:
-                log(event="scroll_pause", message=f"Pausing at {next_start:.2f}s", pause_at=next_start, pause_len=next_len)
-                driver.execute_script("window._scrollState.paused = true")  # freeze JS
+                log(event="scroll_pause", message=f"Smoothly pausing at {next_start:.2f}s", pause_at=next_start, pause_len=next_len)
+                
+                # Start gradual deceleration
+                driver.execute_script("window._scrollState.paused = true")  # Begin pause transition
+                time.sleep(0.2)  # Allow deceleration to take effect
+                
+                # Hold the pause
                 time.sleep(next_len)
-                driver.execute_script("window._scrollState.paused = false") # resume JS
+                
+                # Resume with gradual acceleration
+                driver.execute_script("window._scrollState.paused = false") # Begin resume transition
+                time.sleep(0.15)  # Allow acceleration to take effect
+                
                 remaining_pauses.pop(0)
             
         if finished:
             break
 
-        time.sleep(0.05)
+        time.sleep(0.033)  # ~30fps monitoring for smoother tracking
 
     log(event="scroll_complete", message="Scroll finished")
 
