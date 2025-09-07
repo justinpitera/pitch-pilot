@@ -13,3 +13,7 @@
 # Secrets
 ssl/*
 !ssl/.gitkeep
+
+# Test files (temporary)
+test_*.py
+test_page.html
