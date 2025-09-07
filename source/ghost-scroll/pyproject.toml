@@ -1,0 +1,13 @@
+[project]
+dependencies = [
+  "pyvirtualdisplay>=3.0",
+  "selenium>=4.34.2",
+]
+description = "Auto-generate scroll-driven pitch videos from any URL — clean, smooth, and client-ready."
+name = "ghost-scroll"
+readme = "README.md"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[project.scripts]
+start = "ghostscroll.main:main"

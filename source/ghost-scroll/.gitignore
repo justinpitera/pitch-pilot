@@ -1,0 +1,35 @@
+# Bytecode and cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtualenvs (uv uses `.venv` by default)
+.venv/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+
+# uv-specific lock and metadata
+uv.lock
+.uv/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+
+# Tests / Coverage (optional)
+htmlcov/
+coverage.*
+.cache/
+.pytest_cache/

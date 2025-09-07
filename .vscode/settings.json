@@ -1,5 +1,9 @@
 {
   "files.exclude": {
-    "**/.gitkeep": true
+    "**/.gitkeep": true,
+    "**/*egg-info": true,
+    "**/__pycache__": true,
+    "**/.venv": true,
+    "**/uv.lock": true
   }
 }
