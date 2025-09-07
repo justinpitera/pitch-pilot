@@ -113,14 +113,14 @@ def record_screen(display_var: str, output_file: str, duration: float) -> subpro
 
 def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple[float, float]]) -> None:
     """
-    Keep the page still except during explicitly defined scroll events.
+    Keep the page still except during explicitly defined scroll events with natural human-like behavior.
 
     Args:
         driver: A Selenium ChromeDriver instance.
         duration: Total video duration in seconds.
         scroll_events: List of (start_time, duration) tuples for when scrolling should occur.
     """
-    log(event="scroll_begin", message="Starting scroll with stillness", duration=duration, scroll_events=len(scroll_events))
+    log(event="scroll_begin", message="Starting natural human-like scroll", duration=duration, scroll_events=len(scroll_events))
 
     # If no scroll events defined, just wait for the entire duration (static page)
     if not scroll_events:
@@ -132,13 +132,14 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
     # Initialize scroll state with total page height and scroll events
     total_height = driver.execute_script("return document.documentElement.scrollHeight - window.innerHeight;")  # pyright: ignore[reportUnknownMemberType]
     
-    # Calculate scroll distance per event (distribute total height across events)
-    scroll_per_event = total_height / len(scroll_events) if scroll_events else 0
+    # Reduce scroll distance significantly for more natural behavior - human scrolls are typically shorter
+    # Instead of covering the entire page, scroll shorter distances that feel more like casual browsing
+    natural_scroll_distance = min(total_height * 0.15, 800)  # Max ~15% of page or 800px, whichever is smaller
     
     scroll_state_js = f"""
     window._scrollState = {{
         totalHeight: {total_height},
-        scrollPerEvent: {scroll_per_event},
+        naturalScrollDistance: {natural_scroll_distance},
         events: {json.dumps(scroll_events)},
         currentEventIndex: 0,
         isScrolling: false,
@@ -146,8 +147,20 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         finished: false
     }};
     
-    function easeInOutCubic(t) {{
-        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    // Deterministic random number generator using a simple seed for reproducibility
+    class SeededRandom {{
+        constructor(seed = 12345) {{
+            this.seed = seed;
+        }}
+        
+        next() {{
+            this.seed = (this.seed * 9301 + 49297) % 233280;
+            return this.seed / 233280;
+        }}
+        
+        range(min, max) {{
+            return min + this.next() * (max - min);
+        }}
     }}
     
     function startScrollEvent(eventIndex) {{
@@ -161,24 +174,85 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         s.startPosition = window.pageYOffset;
         s.eventStartTime = performance.now();
         s.eventDuration = eventDuration * 1000; // Convert to ms
+        s.random = new SeededRandom(42 + eventIndex); // Seed varies per event for different patterns
         
-        function scrollStep() {{
-            const elapsed = performance.now() - s.eventStartTime;
-            const progress = Math.min(elapsed / s.eventDuration, 1);
-            const easedProgress = easeInOutCubic(progress);
+        // Break scroll into natural segments with micro-pauses
+        const numSegments = Math.floor(s.random.range(3, 8)); // 3-7 segments per scroll event
+        const segments = [];
+        let totalSegmentTime = 0;
+        
+        // Generate natural segment pattern
+        for (let i = 0; i < numSegments; i++) {{
+            const segmentDuration = s.random.range(80, 300); // 80-300ms per segment
+            const pauseDuration = i < numSegments - 1 ? s.random.range(20, 120) : 0; // 20-120ms pause between segments
+            const scrollAmount = s.naturalScrollDistance / numSegments * s.random.range(0.7, 1.4); // Vary amount per segment
+            const speedVariation = s.random.range(0.6, 1.6); // Speed variation factor
             
-            const targetY = s.startPosition + (s.scrollPerEvent * easedProgress);
-            window.scrollTo(0, targetY);
-            
-            if (progress < 1) {{
-                requestAnimationFrame(scrollStep);
-            }} else {{
-                s.isScrolling = false;
-                s.currentEventIndex++;
-            }}
+            segments.push({{
+                duration: segmentDuration * speedVariation,
+                pause: pauseDuration,
+                amount: scrollAmount
+            }});
+            totalSegmentTime += segmentDuration * speedVariation + pauseDuration;
         }}
         
-        requestAnimationFrame(scrollStep);
+        // Scale timing to fit event duration
+        const scaleFactor = s.eventDuration / totalSegmentTime;
+        segments.forEach(seg => {{
+            seg.duration *= scaleFactor;
+            seg.pause *= scaleFactor;
+        }});
+        
+        s.segments = segments;
+        s.currentSegment = 0;
+        s.segmentStartTime = performance.now();
+        s.segmentStartPosition = s.startPosition;
+        s.totalScrolled = 0;
+        
+        function humanScrollStep() {{
+            const now = performance.now();
+            const segment = s.segments[s.currentSegment];
+            
+            if (!segment) {{
+                s.isScrolling = false;
+                s.currentEventIndex++;
+                return;
+            }}
+            
+            const segmentElapsed = now - s.segmentStartTime;
+            
+            // If we're in a pause phase
+            if (segmentElapsed < segment.pause) {{
+                requestAnimationFrame(humanScrollStep);
+                return;
+            }}
+            
+            // Calculate progress within this segment (after pause)
+            const segmentActiveElapsed = segmentElapsed - segment.pause;
+            const segmentProgress = Math.min(segmentActiveElapsed / segment.duration, 1);
+            
+            // Use slight easing within segment for more natural feel
+            const easeProgress = segmentProgress < 0.5 
+                ? 2 * segmentProgress * segmentProgress 
+                : 1 - Math.pow(-2 * segmentProgress + 2, 2) / 2;
+            
+            const segmentScrollAmount = segment.amount * easeProgress;
+            const targetY = s.segmentStartPosition + segmentScrollAmount;
+            
+            window.scrollTo(0, targetY);
+            
+            // If segment is complete, move to next
+            if (segmentProgress >= 1) {{
+                s.currentSegment++;
+                s.segmentStartTime = now;
+                s.segmentStartPosition = window.pageYOffset;
+                s.totalScrolled += segment.amount;
+            }}
+            
+            requestAnimationFrame(humanScrollStep);
+        }}
+        
+        requestAnimationFrame(humanScrollStep);
     }}
     """
     
@@ -194,7 +268,7 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         # Check if we should start any scroll events
         for i, (event_start, event_duration) in enumerate(scroll_events):
             if i not in processed_events and current_time >= event_start:
-                log(event="scroll_event_start", message=f"Starting scroll event {i+1}", at_time=event_start, duration=event_duration)
+                log(event="scroll_event_start", message=f"Starting natural scroll event {i+1}", at_time=event_start, duration=event_duration)
                 driver.execute_script(f"startScrollEvent({i});")  # pyright: ignore[reportUnknownMemberType]
                 processed_events.add(i)
         
@@ -208,7 +282,7 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         percent = int(progress * 100)
         
         if percent != last_percent and percent % 10 == 0:
-            status = "scrolling" if is_scrolling else "still"
+            status = "natural-scrolling" if is_scrolling else "still"
             log(event="scroll_progress", progress=percent, status=status, current_event=current_event)
             last_percent = percent
         
@@ -218,7 +292,7 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
             
         time.sleep(0.05)
 
-    log(event="scroll_complete", message="Scroll with stillness finished")
+    log(event="scroll_complete", message="Natural human-like scroll finished")
 
 def inject_css(driver: ChromeDriver) -> None:
     """
