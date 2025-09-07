@@ -428,34 +428,53 @@ def adjust_video_speed(input_file: str, output_file: str, actual_duration: float
     ]
     stream_ffmpeg_progress(cmd)
 
-def parse_slow_zones(arg: str) -> list[tuple[float, float]]:
-    """
-    Parse a comma-separated list of slow zones into (start, duration) tuples.
 
+def parse_scroll_timings(scroll_at_arg: str, scroll_duration_arg: str) -> list[tuple[float, float]]:
+    """
+    Parse scroll-at and scroll-duration arguments into (start_time, duration) tuples.
+    
     Args:
-        arg: A string like "3:1.5,10:2,25:1.2" representing slow zones.
-
+        scroll_at_arg: Comma-separated timestamps like "2,6,12"
+        scroll_duration_arg: Comma-separated durations like "2,3,4" 
+    
     Returns:
-        A list of (start_time, duration) float tuples.
-        Invalid entries are skipped silently.
+        List of (start_time, duration) tuples, sorted by start_time.
+        If argument lengths don't match, uses minimum length.
     """
-    zones: list[tuple[float, float]] = []
-    for pair in arg.split(sep=","):
-        if ":" not in pair:
-            continue
-        start_str, duration_str = pair.split(sep=":")
+    scroll_times: list[float] = []
+    scroll_durations: list[float] = []
+    
+    # Parse scroll times
+    for time_str in scroll_at_arg.split(","):
         try:
-            start: float = float(start_str)
-            duration: float = float(duration_str)
-            zones.append((start, duration))
+            time_val = float(time_str.strip())
+            if time_val >= 0:
+                scroll_times.append(time_val)
         except ValueError:
             continue
-    return zones
+    
+    # Parse scroll durations
+    for dur_str in scroll_duration_arg.split(","):
+        try:
+            dur_val = float(dur_str.strip())
+            if dur_val > 0:
+                scroll_durations.append(dur_val)
+        except ValueError:
+            continue
+    
+    # Pair up times and durations (use minimum length)
+    min_len = min(len(scroll_times), len(scroll_durations))
+    points = [(scroll_times[i], scroll_durations[i]) for i in range(min_len)]
+    points.sort(key=lambda p: p[0])
+    return points
 
 def parse_pause_points(arg: str) -> list[tuple[float, float]]:
     """
     Parse a comma-separated list like "2:3,5:1" into [(2.0, 3.0), (5.0, 1.0)].
     Invalid entries are skipped silently.
+    
+    DEPRECATED: This function is kept for backward compatibility but will be removed.
+    Use parse_scroll_timings() instead.
     """
     points: list[tuple[float, float]] = []
     for token in arg.split(sep=","):
@@ -475,12 +494,12 @@ def parse_pause_points(arg: str) -> list[tuple[float, float]]:
 def main() -> None:
     """
     Orchestrates the full scroll recording workflow:
-    - Parses CLI arguments for URL, duration, slow zones, and avatar path
+    - Parses CLI arguments for URL, scroll timings, and video length
     - Starts a virtual X11 display
     - Launches a headless Chrome session to load and prepare the page
     - Preloads lazy content and injects anti-animation CSS
     - Records a smooth scroll using FFmpeg with VAAPI acceleration
-    - Applies playback speed adjustments and optional slow zones
+    - Applies playback speed adjustments to match desired video length
     - Overlays a rounded avatar image in the bottom-right corner (if present)
     - Writes out the final rendered video and logs the result
     """
@@ -488,28 +507,48 @@ def main() -> None:
         log(
             event="error",
             level="error",
-            message="Usage: main.py <url> [desired_duration_seconds] [--slow start1:dur1,...] [--avatar path/to/avatar.jpg]"
+            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--avatar path/to/avatar.jpg]"
         )
         sys.exit(1)
 
     url: str = sys.argv[1]
-    desired_duration: float = float(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else 6.0
 
-    slow_arg: str | None = next((arg for arg in sys.argv if arg.startswith("--slow")), None)
-    slow_zones: list[tuple[float, float]] = parse_slow_zones(arg=slow_arg.replace("--slow", "").strip()) if slow_arg else []
+    # Parse new scroll timing arguments
+    scroll_at_arg: str | None = None
+    if "--scroll-at" in sys.argv:
+        i = sys.argv.index("--scroll-at")
+        if i + 1 < len(sys.argv):
+            scroll_at_arg = sys.argv[i + 1]
+
+    scroll_duration_arg: str | None = None
+    if "--scroll-duration" in sys.argv:
+        i = sys.argv.index("--scroll-duration")
+        if i + 1 < len(sys.argv):
+            scroll_duration_arg = sys.argv[i + 1]
+
+    # Parse video length argument (replaces positional desired_duration)
+    desired_duration: float = 6.0  # Default
+    if "--video-length" in sys.argv:
+        i = sys.argv.index("--video-length")
+        if i + 1 < len(sys.argv):
+            try:
+                desired_duration = float(sys.argv[i + 1])
+            except ValueError:
+                log(event="error", level="error", message="Invalid video length specified")
+                sys.exit(1)
+
+    # Convert new scroll arguments to pause points format (backward compatibility)
+    pause_points: list[tuple[float, float]] = []
+    if scroll_at_arg and scroll_duration_arg:
+        pause_points = parse_scroll_timings(scroll_at_arg, scroll_duration_arg)
     
-    pause_arg: str | None = next((arg for arg in sys.argv if arg.startswith("--pause")), None)
-    pause_points: list[tuple[float, float]] = parse_pause_points(arg=pause_arg.replace("--pause", "").strip()) if pause_arg else []
-    if pause_arg:
-        try:
-            pause_points = [float(x) for x in pause_arg.replace("--pause", "").strip().split(",") if x]
-        except ValueError:
-            pause_points = []
+    # Remove slow zones functionality - no longer supported
+    slow_zones: list[tuple[float, float]] = []
 
     avatar_arg_index: int = sys.argv.index("--avatar") + 1 if "--avatar" in sys.argv else -1
     avatar_path: str = sys.argv[avatar_arg_index] if avatar_arg_index > 0 and avatar_arg_index < len(sys.argv) else "avatar.jpg"
 
-    # New optional flag: --cookies accept|reject|hide  (default: accept)
+    # Optional flag: --cookies accept|reject|hide  (default: accept)
     cookies_mode: str = "accept"
     if "--cookies" in sys.argv:
         i: int = sys.argv.index("--cookies")
@@ -576,7 +615,7 @@ def main() -> None:
         output_file=final_output,
         actual_duration=scroll_duration,
         target_duration=desired_duration,
-        slow_zones=slow_zones
+        slow_zones=slow_zones  # Now always empty since slow zones are removed
     )
 
     if os.path.isfile(path=avatar_path):
