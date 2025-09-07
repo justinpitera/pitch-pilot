@@ -603,7 +603,16 @@ def main() -> None:
     suppress_cookie_banners(driver=driver, mode=cookies_mode)
 
     recorder: Popen[bytes] = record_screen(display_var=display.new_display_var, output_file=raw_output, duration=scroll_duration)
-    scroll_page(driver=driver, duration=scroll_duration, pause_points=pause_points)
+    
+    # Only scroll when explicit scroll arguments are provided
+    if scroll_at_arg and scroll_duration_arg:
+        scroll_page(driver=driver, duration=scroll_duration, pause_points=pause_points)
+    else:
+        # Keep page static - just wait for recording to complete
+        log(event="static_wait", message="Keeping page static", duration=scroll_duration)
+        time.sleep(scroll_duration)
+        log(event="static_complete", message="Static recording finished")
+    
     _ = recorder.wait()
 
     driver.quit()
