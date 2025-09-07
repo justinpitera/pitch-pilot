@@ -17,6 +17,7 @@ import sys
 import os
 import time
 import json
+import shutil
 import threading
 import subprocess
 from textwrap import dedent
@@ -110,47 +111,114 @@ def record_screen(display_var: str, output_file: str, duration: float) -> subpro
         output_file
     ])
 
-def scroll_page(driver: ChromeDriver, duration: float, pause_points: list[tuple[float, float]]) -> None:
+def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple[float, float]]) -> None:
     """
-    Smoothly scroll the page from top to bottom over the given duration.
+    Keep the page still except during explicitly defined scroll events.
 
     Args:
         driver: A Selenium ChromeDriver instance.
-        duration: Total scroll time in seconds.
+        duration: Total video duration in seconds.
+        scroll_events: List of (start_time, duration) tuples for when scrolling should occur.
     """
-    log(event="scroll_begin", message="Starting smooth scroll", duration=duration)
+    log(event="scroll_begin", message="Starting scroll with stillness", duration=duration, scroll_events=len(scroll_events))
 
-    driver.execute_script(script=f"window._scrollState={{startTime:performance.now(),duration:{int(duration * 1000)},totalHeight:document.documentElement.scrollHeight-window.innerHeight,finished:false}};function easeInOutCubic(t){{return t<0.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2}};function step(){{const s=window._scrollState,n=performance.now(),e=n-s.startTime,p=Math.min(e/s.duration,1),q=easeInOutCubic(p),y=s.totalHeight*q;window.scrollTo(0,y);s.progress=p;if(p<1)requestAnimationFrame(step);else s.finished=true}};requestAnimationFrame(step);") # pyright: ignore[reportUnknownMemberType]
+    # If no scroll events defined, just wait for the entire duration (static page)
+    if not scroll_events:
+        log(event="scroll_static", message="No scroll events defined, keeping page still")
+        time.sleep(duration)
+        log(event="scroll_complete", message="Static page recording finished")
+        return
+
+    # Initialize scroll state with total page height and scroll events
+    total_height = driver.execute_script("return document.documentElement.scrollHeight - window.innerHeight;")  # pyright: ignore[reportUnknownMemberType]
+    
+    # Calculate scroll distance per event (distribute total height across events)
+    scroll_per_event = total_height / len(scroll_events) if scroll_events else 0
+    
+    scroll_state_js = f"""
+    window._scrollState = {{
+        totalHeight: {total_height},
+        scrollPerEvent: {scroll_per_event},
+        events: {json.dumps(scroll_events)},
+        currentEventIndex: 0,
+        isScrolling: false,
+        startPosition: 0,
+        finished: false
+    }};
+    
+    function easeInOutCubic(t) {{
+        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    }}
+    
+    function startScrollEvent(eventIndex) {{
+        const s = window._scrollState;
+        const event = s.events[eventIndex];
+        if (!event) return;
         
-    last_percent: int = -1
+        const [startTime, eventDuration] = event;
+        s.isScrolling = true;
+        s.currentEventIndex = eventIndex;
+        s.startPosition = window.pageYOffset;
+        s.eventStartTime = performance.now();
+        s.eventDuration = eventDuration * 1000; // Convert to ms
+        
+        function scrollStep() {{
+            const elapsed = performance.now() - s.eventStartTime;
+            const progress = Math.min(elapsed / s.eventDuration, 1);
+            const easedProgress = easeInOutCubic(progress);
+            
+            const targetY = s.startPosition + (s.scrollPerEvent * easedProgress);
+            window.scrollTo(0, targetY);
+            
+            if (progress < 1) {{
+                requestAnimationFrame(scrollStep);
+            }} else {{
+                s.isScrolling = false;
+                s.currentEventIndex++;
+            }}
+        }}
+        
+        requestAnimationFrame(scrollStep);
+    }}
+    """
+    
+    driver.execute_script(scroll_state_js)  # pyright: ignore[reportUnknownMemberType]
+    
+    start_time = time.time()
+    last_percent = -1
+    processed_events = set()
+    
     while True:
-        scroll_state: dict[str, float | bool] = cast(dict[str, float | bool], driver.execute_script(script="return window._scrollState || {}")) # pyright: ignore[reportUnknownMemberType]
-        remaining_pauses: list[tuple[float, float]] = list(pause_points)
-
-        progress: float = float(scroll_state.get("progress", 0))
-        finished: bool = bool(scroll_state.get("finished", False))
-        percent: int = int(progress * 100)
-
-        if percent != last_percent and percent % 5 == 0:
-            log(event="scroll_progress", progress=percent)
+        current_time = time.time() - start_time
+        
+        # Check if we should start any scroll events
+        for i, (event_start, event_duration) in enumerate(scroll_events):
+            if i not in processed_events and current_time >= event_start:
+                log(event="scroll_event_start", message=f"Starting scroll event {i+1}", at_time=event_start, duration=event_duration)
+                driver.execute_script(f"startScrollEvent({i});")  # pyright: ignore[reportUnknownMemberType]
+                processed_events.add(i)
+        
+        # Check scroll state and log progress
+        scroll_state = driver.execute_script("return window._scrollState || {};")  # pyright: ignore[reportUnknownMemberType]
+        is_scrolling = scroll_state.get("isScrolling", False)
+        current_event = scroll_state.get("currentEventIndex", 0)
+        
+        # Calculate overall progress based on time
+        progress = min(current_time / duration, 1.0) if duration > 0 else 1.0
+        percent = int(progress * 100)
+        
+        if percent != last_percent and percent % 10 == 0:
+            status = "scrolling" if is_scrolling else "still"
+            log(event="scroll_progress", progress=percent, status=status, current_event=current_event)
             last_percent = percent
-            
-        # Handle configured pauses (absolute seconds along the scroll timeline)
-        elapsed_sec: float = progress * duration
-        if remaining_pauses:
-            next_start, next_len = remaining_pauses[0]
-            # Trigger pause once when we pass the start time
-            if elapsed_sec >= next_start:
-                log(event="scroll_pause", message=f"Pausing at {next_start:.2f}s", pause_at=next_start, pause_len=next_len)
-                time.sleep(next_len)
-                remaining_pauses.pop(0)
-            
-        if finished:
+        
+        # Check if we're done
+        if current_time >= duration:
             break
-
+            
         time.sleep(0.05)
 
-    log(event="scroll_complete", message="Scroll finished")
+    log(event="scroll_complete", message="Scroll with stillness finished")
 
 def inject_css(driver: ChromeDriver) -> None:
     """
@@ -537,10 +605,10 @@ def main() -> None:
                 log(event="error", level="error", message="Invalid video length specified")
                 sys.exit(1)
 
-    # Convert new scroll arguments to pause points format (backward compatibility)
-    pause_points: list[tuple[float, float]] = []
+    # Parse scroll events from new arguments
+    scroll_events: list[tuple[float, float]] = []
     if scroll_at_arg and scroll_duration_arg:
-        pause_points = parse_scroll_timings(scroll_at_arg, scroll_duration_arg)
+        scroll_events = parse_scroll_timings(scroll_at_arg, scroll_duration_arg)
     
     # Remove slow zones functionality - no longer supported
     slow_zones: list[tuple[float, float]] = []
@@ -557,7 +625,8 @@ def main() -> None:
             if val in {"accept", "reject", "hide"}:
                 cookies_mode = val
                 
-    scroll_duration: float = min(max(desired_duration * 2.5, 6.0), 25.0)
+    # Record for the exact video length desired (no need for speed adjustment with timed scroll events)
+    recording_duration: float = desired_duration
 
     safe_dir: str = safe_dir_from_url(url)
     os.makedirs(name=safe_dir, exist_ok=True)
@@ -602,21 +671,27 @@ def main() -> None:
     inject_css(driver)
     suppress_cookie_banners(driver=driver, mode=cookies_mode)
 
-    recorder: Popen[bytes] = record_screen(display_var=display.new_display_var, output_file=raw_output, duration=scroll_duration)
-    scroll_page(driver=driver, duration=scroll_duration, pause_points=pause_points)
+    recorder: Popen[bytes] = record_screen(display_var=display.new_display_var, output_file=raw_output, duration=recording_duration)
+    scroll_page(driver=driver, duration=recording_duration, scroll_events=scroll_events)
     _ = recorder.wait()
 
     driver.quit()
     _ = display.stop()
     log(event="display_stop", message="Virtual display and browser shut down")
 
-    adjust_video_speed(
-        input_file=raw_output,
-        output_file=final_output,
-        actual_duration=scroll_duration,
-        target_duration=desired_duration,
-        slow_zones=slow_zones  # Now always empty since slow zones are removed
-    )
+    # Only apply speed adjustment if actual recording duration differs from target
+    if abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
+        adjust_video_speed(
+            input_file=raw_output,
+            output_file=final_output,
+            actual_duration=recording_duration,
+            target_duration=desired_duration,
+            slow_zones=slow_zones  # Now always empty since slow zones are removed
+        )
+    else:
+        # No speed adjustment needed, use raw output directly
+        shutil.copy2(raw_output, final_output)
+        log(event="speed_adjustment_skipped", message="Recording duration matches target, no adjustment needed")
 
     if os.path.isfile(path=avatar_path):
         overlay_avatar(
@@ -637,7 +712,8 @@ def main() -> None:
         "type": "result",
         "url": url,
         "desired_duration_sec": round(number=desired_duration, ndigits=2),
-        "raw_duration_sec": round(number=scroll_duration, ndigits=2),
+        "recording_duration_sec": round(number=recording_duration, ndigits=2),
+        "scroll_events": len(scroll_events),
         "output_path": avatar_output
     }
 
