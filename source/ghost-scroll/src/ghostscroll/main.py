@@ -110,6 +110,17 @@ def record_screen(display_var: str, output_file: str, duration: float) -> subpro
         output_file
     ])
 
+def wait_static(duration: float) -> None:
+    """
+    Wait for the specified duration without any scrolling or page interaction.
+    
+    Args:
+        duration: Time to wait in seconds.
+    """
+    log(event="static_begin", message="Keeping page static", duration=duration)
+    time.sleep(duration)
+    log(event="static_complete", message="Static wait finished")
+
 def scroll_page(driver: ChromeDriver, duration: float, pause_points: list[tuple[float, float]]) -> None:
     """
     Smoothly scroll the page from top to bottom over the given duration.
@@ -539,8 +550,10 @@ def main() -> None:
 
     # Convert new scroll arguments to pause points format (backward compatibility)
     pause_points: list[tuple[float, float]] = []
+    should_scroll: bool = False
     if scroll_at_arg and scroll_duration_arg:
         pause_points = parse_scroll_timings(scroll_at_arg, scroll_duration_arg)
+        should_scroll = len(pause_points) > 0
     
     # Remove slow zones functionality - no longer supported
     slow_zones: list[tuple[float, float]] = []
@@ -557,7 +570,13 @@ def main() -> None:
             if val in {"accept", "reject", "hide"}:
                 cookies_mode = val
                 
-    scroll_duration: float = min(max(desired_duration * 2.5, 6.0), 25.0)
+    # Determine recording duration based on whether scrolling will occur
+    if should_scroll:
+        # Use longer duration for smooth scrolling, will be adjusted later
+        recording_duration: float = min(max(desired_duration * 2.5, 6.0), 25.0)
+    else:
+        # Record for exact video length since no speed adjustment needed
+        recording_duration = desired_duration
 
     safe_dir: str = safe_dir_from_url(url)
     os.makedirs(name=safe_dir, exist_ok=True)
@@ -602,21 +621,31 @@ def main() -> None:
     inject_css(driver)
     suppress_cookie_banners(driver=driver, mode=cookies_mode)
 
-    recorder: Popen[bytes] = record_screen(display_var=display.new_display_var, output_file=raw_output, duration=scroll_duration)
-    scroll_page(driver=driver, duration=scroll_duration, pause_points=pause_points)
+    recorder: Popen[bytes] = record_screen(display_var=display.new_display_var, output_file=raw_output, duration=recording_duration)
+    
+    if should_scroll:
+        scroll_page(driver=driver, duration=recording_duration, pause_points=pause_points)
+    else:
+        wait_static(duration=recording_duration)
+    
     _ = recorder.wait()
 
     driver.quit()
     _ = display.stop()
     log(event="display_stop", message="Virtual display and browser shut down")
 
-    adjust_video_speed(
-        input_file=raw_output,
-        output_file=final_output,
-        actual_duration=scroll_duration,
-        target_duration=desired_duration,
-        slow_zones=slow_zones  # Now always empty since slow zones are removed
-    )
+    # Only adjust video speed if scrolling occurred
+    if should_scroll:
+        adjust_video_speed(
+            input_file=raw_output,
+            output_file=final_output,
+            actual_duration=recording_duration,
+            target_duration=desired_duration,
+            slow_zones=slow_zones  # Now always empty since slow zones are removed
+        )
+    else:
+        # No speed adjustment needed, recording duration already matches desired duration
+        final_output = raw_output
 
     if os.path.isfile(path=avatar_path):
         overlay_avatar(
@@ -637,7 +666,7 @@ def main() -> None:
         "type": "result",
         "url": url,
         "desired_duration_sec": round(number=desired_duration, ndigits=2),
-        "raw_duration_sec": round(number=scroll_duration, ndigits=2),
+        "raw_duration_sec": round(number=recording_duration, ndigits=2),
         "output_path": avatar_output
     }
 
