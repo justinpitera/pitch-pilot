@@ -117,58 +117,15 @@ def scroll_page(driver: ChromeDriver, duration: float, pause_points: list[tuple[
     Args:
         driver: A Selenium ChromeDriver instance.
         duration: Total scroll time in seconds.
-        pause_points: List of (start_time, duration) tuples for pausing.
     """
     log(event="scroll_begin", message="Starting smooth scroll", duration=duration)
 
-    # Updated JavaScript with pause support
-    driver.execute_script(script=f"""
-window._scrollState = {{
-  startTime: performance.now(),
-  duration: {int(duration * 1000)},
-  totalHeight: document.documentElement.scrollHeight - window.innerHeight,
-  finished: false,
-  progress: 0,
-  paused: false,
-  holdMark: null,
-  holdAccum: 0
-}};
-
-function easeInOutCubic(t) {{ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }}
-
-function step() {{
-  const s = window._scrollState;
-  const n = performance.now();
-
-  if (s.paused) {{
-    if (s.holdMark === null) s.holdMark = n;
-    requestAnimationFrame(step);
-    return;
-  }} else if (s.holdMark !== null) {{
-    s.holdAccum += (n - s.holdMark);
-    s.holdMark = null;
-  }}
-
-  const e = n - s.startTime - s.holdAccum;
-  const p = Math.min(e / s.duration, 1);
-  const q = easeInOutCubic(p);
-  const y = s.totalHeight * q;
-
-  window.scrollTo(0, y);
-  s.progress = p;
-
-  if (p < 1) requestAnimationFrame(step);
-  else s.finished = true;
-}}
-requestAnimationFrame(step);
-    """) # pyright: ignore[reportUnknownMemberType]
+    driver.execute_script(script=f"window._scrollState={{startTime:performance.now(),duration:{int(duration * 1000)},totalHeight:document.documentElement.scrollHeight-window.innerHeight,finished:false}};function easeInOutCubic(t){{return t<0.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2}};function step(){{const s=window._scrollState,n=performance.now(),e=n-s.startTime,p=Math.min(e/s.duration,1),q=easeInOutCubic(p),y=s.totalHeight*q;window.scrollTo(0,y);s.progress=p;if(p<1)requestAnimationFrame(step);else s.finished=true}};requestAnimationFrame(step);") # pyright: ignore[reportUnknownMemberType]
         
-    # Create remaining_pauses once outside the loop
-    remaining_pauses: list[tuple[float, float]] = list(pause_points)
     last_percent: int = -1
-    
     while True:
         scroll_state: dict[str, float | bool] = cast(dict[str, float | bool], driver.execute_script(script="return window._scrollState || {}")) # pyright: ignore[reportUnknownMemberType]
+        remaining_pauses: list[tuple[float, float]] = list(pause_points)
 
         progress: float = float(scroll_state.get("progress", 0))
         finished: bool = bool(scroll_state.get("finished", False))
@@ -185,9 +142,7 @@ requestAnimationFrame(step);
             # Trigger pause once when we pass the start time
             if elapsed_sec >= next_start:
                 log(event="scroll_pause", message=f"Pausing at {next_start:.2f}s", pause_at=next_start, pause_len=next_len)
-                driver.execute_script("window._scrollState.paused = true")  # freeze JS
                 time.sleep(next_len)
-                driver.execute_script("window._scrollState.paused = false") # resume JS
                 remaining_pauses.pop(0)
             
         if finished:
@@ -543,18 +498,13 @@ def main() -> None:
     slow_arg: str | None = next((arg for arg in sys.argv if arg.startswith("--slow")), None)
     slow_zones: list[tuple[float, float]] = parse_slow_zones(arg=slow_arg.replace("--slow", "").strip()) if slow_arg else []
     
-    # Parse pause argument - handle both '--pause2:3,5:1' and '--pause 2:3,5:1' formats
     pause_arg: str | None = next((arg for arg in sys.argv if arg.startswith("--pause")), None)
+    pause_points: list[tuple[float, float]] = parse_pause_points(arg=pause_arg.replace("--pause", "").strip()) if pause_arg else []
     if pause_arg:
-        pause_value = pause_arg.replace("--pause", "").strip()
-        if not pause_value and "--pause" in sys.argv:
-            # Handle '--pause 2:3,5:1' format (space separated)
-            pause_index = sys.argv.index("--pause")
-            if pause_index + 1 < len(sys.argv):
-                pause_value = sys.argv[pause_index + 1]
-        pause_points = parse_pause_points(pause_value) if pause_value else []
-    else:
-        pause_points = []
+        try:
+            pause_points = [float(x) for x in pause_arg.replace("--pause", "").strip().split(",") if x]
+        except ValueError:
+            pause_points = []
 
     avatar_arg_index: int = sys.argv.index("--avatar") + 1 if "--avatar" in sys.argv else -1
     avatar_path: str = sys.argv[avatar_arg_index] if avatar_arg_index > 0 and avatar_arg_index < len(sys.argv) else "avatar.jpg"
