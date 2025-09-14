@@ -269,7 +269,15 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         for i, (event_start, event_duration) in enumerate(scroll_events):
             if i not in processed_events and current_time >= event_start:
                 log(event="scroll_event_start", message=f"Starting natural scroll event {i+1}", at_time=event_start, duration=event_duration)
-                driver.execute_script(f"startScrollEvent({i});")  # pyright: ignore[reportUnknownMemberType]
+                try:
+                    # Check if startScrollEvent function is defined before calling it
+                    function_exists = driver.execute_script("return typeof window.startScrollEvent === 'function';")  # pyright: ignore[reportUnknownMemberType]
+                    if function_exists:
+                        driver.execute_script(f"startScrollEvent({i});")  # pyright: ignore[reportUnknownMemberType]
+                    else:
+                        log(event="scroll_error", level="warning", message=f"startScrollEvent function not defined, skipping event {i+1}")
+                except Exception as e:
+                    log(event="scroll_error", level="warning", message=f"Error calling startScrollEvent: {str(e)}", event_index=i)
                 processed_events.add(i)
         
         # Check scroll state and log progress
@@ -649,7 +657,8 @@ def main() -> None:
         log(
             event="error",
             level="error",
-            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--avatar path/to/avatar.jpg]"
+            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--avatar path/to/avatar.jpg]\n"
+                   "Note: --video-length is optional. If not provided, video will be recorded at full duration without speed adjustment."
         )
         sys.exit(1)
 
@@ -668,16 +677,22 @@ def main() -> None:
         if i + 1 < len(sys.argv):
             scroll_duration_arg = sys.argv[i + 1]
 
-    # Parse video length argument (replaces positional desired_duration)
-    desired_duration: float = 6.0  # Default
+    # Parse video length argument - only apply duration control if explicitly provided
+    desired_duration: float | None = None  # Default: preserve full video duration
     if "--video-length" in sys.argv:
         i = sys.argv.index("--video-length")
         if i + 1 < len(sys.argv):
             try:
                 desired_duration = float(sys.argv[i + 1])
+                if desired_duration <= 0:
+                    log(event="error", level="error", message="Video length must be positive")
+                    sys.exit(1)
             except ValueError:
-                log(event="error", level="error", message="Invalid video length specified")
+                log(event="error", level="error", message="Invalid video length specified - must be a number")
                 sys.exit(1)
+        else:
+            log(event="error", level="error", message="--video-length requires a numeric value")
+            sys.exit(1)
 
     # Parse scroll events from new arguments
     scroll_events: list[tuple[float, float]] = []
@@ -699,8 +714,10 @@ def main() -> None:
             if val in {"accept", "reject", "hide"}:
                 cookies_mode = val
                 
-    # Record for the exact video length desired (no need for speed adjustment with timed scroll events)
-    recording_duration: float = desired_duration
+    # Record for the exact video length desired (if specified) or use a default recording duration
+    # When no --video-length is specified, record for a reasonable default time without speed adjustment
+    default_recording_duration: float = 15.0  # Record for 15 seconds by default
+    recording_duration: float = desired_duration if desired_duration is not None else default_recording_duration
 
     safe_dir: str = safe_dir_from_url(url)
     os.makedirs(name=safe_dir, exist_ok=True)
@@ -753,8 +770,8 @@ def main() -> None:
     _ = display.stop()
     log(event="display_stop", message="Virtual display and browser shut down")
 
-    # Only apply speed adjustment if actual recording duration differs from target
-    if abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
+    # Only apply speed adjustment if a desired duration was explicitly provided
+    if desired_duration is not None and abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
         adjust_video_speed(
             input_file=raw_output,
             output_file=final_output,
@@ -762,10 +779,15 @@ def main() -> None:
             target_duration=desired_duration,
             slow_zones=slow_zones  # Now always empty since slow zones are removed
         )
+        log(event="speed_adjustment_applied", message="Video speed adjusted to match target duration", 
+            recording_duration=recording_duration, target_duration=desired_duration)
     else:
-        # No speed adjustment needed, use raw output directly
+        # No speed adjustment - preserve full video duration
         shutil.copy2(raw_output, final_output)
-        log(event="speed_adjustment_skipped", message="Recording duration matches target, no adjustment needed")
+        if desired_duration is None:
+            log(event="full_duration_preserved", message="Full video duration preserved - no target length specified")
+        else:
+            log(event="speed_adjustment_skipped", message="Recording duration matches target, no adjustment needed")
 
     if os.path.isfile(path=avatar_path):
         overlay_avatar(
@@ -782,13 +804,14 @@ def main() -> None:
         )
         avatar_output = final_output
 
-    result: dict[str, str | float] = {
+    result: dict[str, str | float | None] = {
         "type": "result",
         "url": url,
-        "desired_duration_sec": round(number=desired_duration, ndigits=2),
+        "desired_duration_sec": round(number=desired_duration, ndigits=2) if desired_duration is not None else None,
         "recording_duration_sec": round(number=recording_duration, ndigits=2),
         "scroll_events": len(scroll_events),
-        "output_path": avatar_output
+        "output_path": avatar_output,
+        "full_duration_preserved": desired_duration is None
     }
 
     print(json.dumps(obj=result), flush=True)
