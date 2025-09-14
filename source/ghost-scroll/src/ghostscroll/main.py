@@ -18,11 +18,8 @@ import os
 import time
 import json
 import shutil
-import threading
 import subprocess
 from textwrap import dedent
-from typing import IO, cast
-from threading import Thread
 from subprocess import Popen
 from urllib.parse import ParseResult, urlparse
 
@@ -269,8 +266,13 @@ def scroll_page(driver: ChromeDriver, duration: float, scroll_events: list[tuple
         for i, (event_start, event_duration) in enumerate(scroll_events):
             if i not in processed_events and current_time >= event_start:
                 log(event="scroll_event_start", message=f"Starting natural scroll event {i+1}", at_time=event_start, duration=event_duration)
-                driver.execute_script(f"startScrollEvent({i});")  # pyright: ignore[reportUnknownMemberType]
-                processed_events.add(i)
+                # Safely call startScrollEvent with error handling
+                try:
+                    driver.execute_script(f"if (typeof startScrollEvent === 'function') {{ startScrollEvent({i}); }} else {{ console.error('startScrollEvent function not defined'); }}")  # pyright: ignore[reportUnknownMemberType]
+                    processed_events.add(i)
+                except Exception as e:
+                    log(event="scroll_event_error", level="error", message=f"Failed to start scroll event {i}", error=str(e))
+                    processed_events.add(i)  # Mark as processed to avoid retry
         
         # Check scroll state and log progress
         scroll_state = driver.execute_script("return window._scrollState || {};")  # pyright: ignore[reportUnknownMemberType]
@@ -445,45 +447,7 @@ def preload_content(driver: ChromeDriver) -> None:
     driver.execute_script(script="window.scrollTo(0, 0);") # pyright: ignore[reportUnknownMemberType]
     time.sleep(1)
 
-def stream_ffmpeg_progress(cmd: list[str]) -> None:
-    """
-    Run an FFmpeg command and stream its progress output to structured logs.
 
-    Args:
-        cmd: The FFmpeg command to execute, split into a list of arguments.
-
-    Raises:
-        RuntimeError: If the subprocess fails to initialize stdout correctly.
-    """
-    process: Popen[str] = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1
-    )
-
-    stdout: IO[str] | None = process.stdout
-    if stdout is None:
-        raise RuntimeError("process.stdout is None — did you forget stdout=subprocess.PIPE?")
-
-    def parse_stream() -> None:
-        progress_data: dict[str, str] = {}
-        for line in stdout:
-            line: str = line.strip()
-            if "=" in line:
-                key, value = line.split(sep="=", maxsplit=1)
-                progress_data[key] = value
-            if line == "progress=end":
-                log(event="ffmpeg_progress", message="Progress complete", **progress_data)
-                break
-            if "frame" in progress_data:
-                log(event="ffmpeg_frame", **progress_data)
-
-    thread: Thread = threading.Thread(target=parse_stream)
-    thread.start()
-    _ = process.wait()
-    thread.join()
 
 def overlay_avatar(input_file: str, output_file: str, avatar_path: str) -> None:
     """
@@ -532,43 +496,6 @@ def overlay_avatar(input_file: str, output_file: str, avatar_path: str) -> None:
         log(event="overlay_complete", message="Avatar overlay finished")
 
 
-def adjust_video_speed(input_file: str, output_file: str, actual_duration: float, target_duration: float, slow_zones: list[tuple[float, float]]) -> None:
-    """
-    Adjust the playback speed of a video using FFmpeg, with optional slow zones.
-
-    Args:
-        input_file: Path to the input video file.
-        output_file: Path to the output video file.
-        actual_duration: Original scroll recording duration in seconds.
-        target_duration: Desired final video length in seconds.
-        slow_zones: List of (start_time, duration) tuples to slow down specific segments.
-    """
-    rate: float = actual_duration / target_duration
-    log(event="adjust_speed", message="Adjusting playback speed", base_rate=rate)
-
-    filter_parts: list[str] = []
-    for start, duration in slow_zones:
-        end: float = start + duration
-        part: str = f"between(t,{start:.2f},{end:.2f})"
-        filter_parts.append(part)
-
-    slowdown_expr: str = f"if({' + '.join(filter_parts)},2,{1 / rate:.5f})" if filter_parts else f"{1 / rate:.5f}"
-    filter_chain: str = f"setpts={slowdown_expr}*PTS,fps=60"
-
-    log(event="adjust_filter", message="Using setpts filter", expression=slowdown_expr)
-
-    cmd: list[str] = [
-        "ffmpeg",
-        "-y",
-        "-loglevel", "error",
-        "-i", input_file,
-        "-filter:v", filter_chain,
-        "-an",
-        "-progress", "pipe:1",
-        "-nostats",
-        output_file
-    ]
-    stream_ffmpeg_progress(cmd)
 
 
 def parse_scroll_timings(scroll_at_arg: str, scroll_duration_arg: str) -> list[tuple[float, float]]:
@@ -636,20 +563,23 @@ def parse_pause_points(arg: str) -> list[tuple[float, float]]:
 def main() -> None:
     """
     Orchestrates the full scroll recording workflow:
-    - Parses CLI arguments for URL, scroll timings, and video length
+    - Parses CLI arguments for URL, scroll timings, and required video length
     - Starts a virtual X11 display
     - Launches a headless Chrome session to load and prepare the page
     - Preloads lazy content and injects anti-animation CSS
     - Records a smooth scroll using FFmpeg with VAAPI acceleration
-    - Applies playback speed adjustments to match desired video length
+    - Records videos at their natural duration without stretching or compression
     - Overlays a rounded avatar image in the bottom-right corner (if present)
     - Writes out the final rendered video and logs the result
+    
+    The video length parameter is required and serves as an input requirement,
+    but the actual recording preserves the natural runtime without speed adjustment.
     """
     if len(sys.argv) < 2:
         log(
             event="error",
             level="error",
-            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--avatar path/to/avatar.jpg]"
+            message="Usage: main.py <url> --video-length <seconds> [--scroll-at times] [--scroll-duration durations] [--avatar path/to/avatar.jpg]"
         )
         sys.exit(1)
 
@@ -668,8 +598,8 @@ def main() -> None:
         if i + 1 < len(sys.argv):
             scroll_duration_arg = sys.argv[i + 1]
 
-    # Parse video length argument (replaces positional desired_duration)
-    desired_duration: float = 6.0  # Default
+    # Parse video length argument - now required
+    desired_duration: float | None = None
     if "--video-length" in sys.argv:
         i = sys.argv.index("--video-length")
         if i + 1 < len(sys.argv):
@@ -678,6 +608,12 @@ def main() -> None:
             except ValueError:
                 log(event="error", level="error", message="Invalid video length specified")
                 sys.exit(1)
+        else:
+            log(event="error", level="error", message="--video-length requires a value")
+            sys.exit(1)
+    else:
+        log(event="error", level="error", message="--video-length is required")
+        sys.exit(1)
 
     # Parse scroll events from new arguments
     scroll_events: list[tuple[float, float]] = []
@@ -699,8 +635,10 @@ def main() -> None:
             if val in {"accept", "reject", "hide"}:
                 cookies_mode = val
                 
-    # Record for the exact video length desired (no need for speed adjustment with timed scroll events)
-    recording_duration: float = desired_duration
+    # Record for the actual duration needed by the scroll events, ignoring desired_duration for recording
+    # The desired_duration is now only used for validation/input requirement
+    max_scroll_end_time = max([start + duration for start, duration in scroll_events], default=0.0)
+    recording_duration: float = max(max_scroll_end_time + 1.0, desired_duration)  # Add 1 second buffer or use desired duration if longer
 
     safe_dir: str = safe_dir_from_url(url)
     os.makedirs(name=safe_dir, exist_ok=True)
@@ -753,19 +691,9 @@ def main() -> None:
     _ = display.stop()
     log(event="display_stop", message="Virtual display and browser shut down")
 
-    # Only apply speed adjustment if actual recording duration differs from target
-    if abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
-        adjust_video_speed(
-            input_file=raw_output,
-            output_file=final_output,
-            actual_duration=recording_duration,
-            target_duration=desired_duration,
-            slow_zones=slow_zones  # Now always empty since slow zones are removed
-        )
-    else:
-        # No speed adjustment needed, use raw output directly
-        shutil.copy2(raw_output, final_output)
-        log(event="speed_adjustment_skipped", message="Recording duration matches target, no adjustment needed")
+    # Always use raw output directly - no speed adjustment to preserve natural duration
+    shutil.copy2(raw_output, final_output)
+    log(event="natural_duration_preserved", message="Video recorded at natural duration without stretching or compression")
 
     if os.path.isfile(path=avatar_path):
         overlay_avatar(
