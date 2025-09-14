@@ -17,3 +17,5 @@ ssl/*
 # Test files (temporary)
 test_*.py
 test_page.html
+
+**/*.mp4
