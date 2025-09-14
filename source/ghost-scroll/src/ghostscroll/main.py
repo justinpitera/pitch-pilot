@@ -641,7 +641,7 @@ def main() -> None:
     - Launches a headless Chrome session to load and prepare the page
     - Preloads lazy content and injects anti-animation CSS
     - Records a smooth scroll using FFmpeg with VAAPI acceleration
-    - Applies playback speed adjustments to match desired video length
+    - Optionally applies playback speed adjustments or preserves natural timing
     - Overlays a rounded avatar image in the bottom-right corner (if present)
     - Writes out the final rendered video and logs the result
     """
@@ -649,7 +649,7 @@ def main() -> None:
         log(
             event="error",
             level="error",
-            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--avatar path/to/avatar.jpg]"
+            message="Usage: main.py <url> [--scroll-at times] [--scroll-duration durations] [--video-length seconds] [--preserve-timing] [--avatar path/to/avatar.jpg]"
         )
         sys.exit(1)
 
@@ -679,6 +679,9 @@ def main() -> None:
                 log(event="error", level="error", message="Invalid video length specified")
                 sys.exit(1)
 
+    # Parse preserve-timing flag to disable duration adjustment
+    preserve_timing: bool = "--preserve-timing" in sys.argv
+
     # Parse scroll events from new arguments
     scroll_events: list[tuple[float, float]] = []
     if scroll_at_arg and scroll_duration_arg:
@@ -699,8 +702,18 @@ def main() -> None:
             if val in {"accept", "reject", "hide"}:
                 cookies_mode = val
                 
-    # Record for the exact video length desired (no need for speed adjustment with timed scroll events)
-    recording_duration: float = desired_duration
+    # Calculate actual recording duration based on scroll events or use desired duration
+    if preserve_timing and scroll_events:
+        # For timing preservation, calculate natural duration from scroll events
+        # Use the latest end time as the natural duration
+        max_end_time = max((start + duration for start, duration in scroll_events), default=0.0)
+        # Add buffer time for smooth ending
+        recording_duration: float = max_end_time + 2.0
+        log(event="preserve_timing", message="Using natural recording duration based on scroll events", 
+            natural_duration=recording_duration, scroll_events_count=len(scroll_events))
+    else:
+        # Traditional mode: record for the exact video length desired
+        recording_duration: float = desired_duration
 
     safe_dir: str = safe_dir_from_url(url)
     os.makedirs(name=safe_dir, exist_ok=True)
@@ -753,8 +766,14 @@ def main() -> None:
     _ = display.stop()
     log(event="display_stop", message="Virtual display and browser shut down")
 
-    # Only apply speed adjustment if actual recording duration differs from target
-    if abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
+    # Apply speed adjustment logic based on preserve_timing flag
+    if preserve_timing:
+        # When preserving timing, never apply speed adjustment - use raw recording as-is
+        shutil.copy2(raw_output, final_output)
+        log(event="timing_preserved", message="Natural timing preserved, no speed adjustment applied", 
+            recording_duration_sec=round(recording_duration, 2))
+    elif abs(recording_duration - desired_duration) > 0.1:  # Allow small tolerance
+        # Traditional mode: adjust speed to match desired duration
         adjust_video_speed(
             input_file=raw_output,
             output_file=final_output,
